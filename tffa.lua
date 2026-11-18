@@ -493,24 +493,30 @@ local function buildUI()
     end)
 
     -- drag
-    local drag, start
-    head.InputBegan:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-            drag, start = true, i.Position
-        end
-    end)
-    bind(UIS.InputChanged:Connect(function(i)
-        if drag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
-            local d = i.Position - start
-            start = i.Position
-            win.Position = UDim2.new(0, win.AbsolutePosition.X + d.X, 0, win.AbsolutePosition.Y + d.Y)
-        end
-    end))
-    bind(UIS.InputEnded:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-            drag = false
-        end
-    end))
+    local dragInput, dragStart, startPos
+local function isMove(inp)
+    return inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch
+end
+head.InputBegan:Connect(function(inp)
+    if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+        dragInput = inp
+        dragStart = inp.Position
+        startPos = Vector2.new(win.AbsolutePosition.X, win.AbsolutePosition.Y)
+    end
+end)
+bind(UIS.InputChanged:Connect(function(inp)
+    if not dragInput or not isMove(inp) then return end
+    local d = inp.Position - dragStart
+    local vp = workspace.CurrentCamera.ViewportSize
+    local x = math.clamp(startPos.X + d.X, 0, math.max(0, vp.X - win.AbsoluteSize.X))
+    local y = math.clamp(startPos.Y + d.Y, 0, math.max(0, vp.Y - win.AbsoluteSize.Y))
+    win.Position = UDim2.fromOffset(x, y)
+end))
+bind(UIS.InputEnded:Connect(function(inp)
+    if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+        dragInput = nil
+    end
+end))
 
     local minimized = false
     hbtn("–", -58, function()
