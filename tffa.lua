@@ -1,5 +1,5 @@
 --[[ Throw Food For Animals | custom auto farm
-     Self contained, keyless. RightShift = toggle menu ]]
+     Self contained, keyless. RightShift = show/hide menu ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
 
@@ -54,6 +54,36 @@ local function get(key)
     if not Data then return nil end
     local ok, v = pcall(function() return Data:Get(key) end)
     if ok then return v end
+end
+
+-- prices / money
+local Config = RS:FindFirstChild("Config")
+local function tryRequire(name)
+    local c = Config and Config:FindFirstChild(name)
+    if not c then return nil end
+    local ok, mod = pcall(require, c)
+    if ok then return mod end
+end
+local StandsConfig = tryRequire("StandsConfig")
+local FenceConfig  = tryRequire("FenceConfig")
+local FoodsConfig  = tryRequire("FoodsConfig")
+
+local function money() return tonumber(get("Money")) or 0 end
+local function standPrice()
+    if not (StandsConfig and StandsConfig.Get) then return nil end
+    local lvl = (tonumber(get("Stand")) or 0) + 1
+    local ok, node = pcall(StandsConfig.Get, lvl)
+    if ok and type(node) == "table" then return tonumber(node.Price) end
+end
+local function fencePrice()
+    if not (FenceConfig and FenceConfig.Upgrades) then return nil end
+    local up = FenceConfig.Upgrades[(tonumber(get("FenceLevel")) or 0) + 1]
+    if type(up) == "table" then return tonumber(up.Price) end
+end
+local function foodPrice(i)
+    if not (FoodsConfig and FoodsConfig.GetAny) then return nil end
+    local ok, food = pcall(FoodsConfig.GetAny, i)
+    if ok and type(food) == "table" then return tonumber(food.Price) end
 end
 
 local function root()
@@ -162,14 +192,77 @@ end)
 
 -- training x2 bonus
 do
-    local ev = Remotes:FindFirstChild("Training_Bonus")
-    if ev and ev:IsA("RemoteEvent") then
-        bind(ev.OnClientEvent:Connect(function(payload)
-            if not flags.autoBonus then return end
-            local id = type(payload) == "table" and payload.Id or payload
-            if id ~= nil then task.spawn(invoke, "Training_TapBonus", id) end
-        end))
+    local function clickButton(btn)
+        local p = btn.AbsolutePosition + btn.AbsoluteSize / 2
+        VIM:SendMouseButtonEvent(p.X, p.Y, 0, true, game, 1)
+        VIM:SendMouseButtonEvent(p.X, p.Y, 0, false, game, 1)
     end
+
+    local function findBonusButton()
+        local pg = LP:FindFirstChild("PlayerGui")
+        if not pg then return nil end
+        for _, d in ipairs(pg:GetDescendants()) do
+            if d:IsA("GuiButton") and d.Visible and d.AbsoluteSize.X > 8 then
+                local n = string.lower(d.Name)
+                if n:find("bonus") or n:find("2x") or n:find("multiplier") or n:find("double") then
+                    return d
+                end
+            end
+        end
+    end
+
+    local function idsFrom(payload, out)
+        out = out or {}
+        if type(payload) == "number" or type(payload) == "string" then
+            out[#out + 1] = payload
+        elseif type(payload) == "table" then
+            for k, v in pairs(payload) do
+                if type(k) == "string" and string.lower(k):find("^id") then
+                    table.insert(out, 1, v)
+                else
+                    idsFrom(v, out)
+                end
+            end
+        end
+        return out
+    end
+
+    local function tryRemote(payload)
+        local ids = idsFrom(payload)
+        if #ids == 0 then return false end
+        for _, id in ipairs(ids) do
+            if good(invoke("Training_TapBonus", id)) then return true end
+        end
+        return false
+    end
+
+    local lastTap = 0
+    local function tapBonus(payload)
+        if not flags.autoBonus then return end
+        if os.clock() - lastTap < 0.25 then return end
+        lastTap = os.clock()
+        if payload and tryRemote(payload) then return end
+        local btn = findBonusButton()
+        if btn then clickButton(btn) end
+    end
+
+    for _, r in ipairs(Remotes:GetChildren()) do
+        if r:IsA("RemoteEvent") then
+            local n = string.lower(r.Name)
+            if n:find("bonus") or n:find("tap") or n:find("multiplier") then
+                bind(r.OnClientEvent:Connect(function(...)
+                    if flags.autoBonus then tapBonus(select(1, ...)) end
+                end))
+            end
+        end
+    end
+
+    task.spawn(function()
+        while alive do
+            task.wait(0.2)
+            if flags.autoBonus and training then tapBonus(nil) end
+        end
+    end)
 end
 
 local function loop(flag, interval, fn)
@@ -210,15 +303,38 @@ loop("autoSell", function() return cfg.sellEvery end, function()
 end)
 
 loop("autoUpgrade", function() return cfg.upEvery end, function()
-    invoke("Stand_Upgrade")
-    invoke("Plot_UpgradeFence")
+    if not Data then return end
+    local cash = money()
+    local sp = standPrice()
+    if sp then
+        if cash >= sp then invoke("Stand_Upgrade") end
+    elseif cash >= 500 then
+        invoke("Stand_Upgrade")
+    end
+    local fp = fencePrice()
+    if fp then
+        if cash >= fp then invoke("Plot_UpgradeFence") end
+    elseif cash >= 500 then
+        invoke("Plot_UpgradeFence")
+    end
 end)
 
 loop("autoFood", 6, function()
+    if not Data then return end
+    local cash = money()
     local equipped = tonumber(get("EquippedFood")) or 1
-    for i = equipped + 1, equipped + 4 do
-        local r = invoke("Shop_Buy", i)
-        if good(r) then invoke("Shop_Equip", i) break end
+    for i = equipped + 1, equipped + 3 do
+        local owned = false
+        pcall(function() owned = Data:GetPath("OwnedFoods." .. i) == true end)
+        if owned then
+            invoke("Shop_Equip", i)
+            return
+        end
+        local p = foodPrice(i)
+        if p and cash >= p then
+            if good(invoke("Shop_Buy", i)) then invoke("Shop_Equip", i) end
+            return
+        end
     end
 end)
 
@@ -494,29 +610,37 @@ local function buildUI()
 
     -- drag
     local dragInput, dragStart, startPos
-local function isMove(inp)
-    return inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch
-end
-head.InputBegan:Connect(function(inp)
-    if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
-        dragInput = inp
-        dragStart = inp.Position
-        startPos = Vector2.new(win.AbsolutePosition.X, win.AbsolutePosition.Y)
+    local function isMove(inp)
+        return inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch
     end
-end)
-bind(UIS.InputChanged:Connect(function(inp)
-    if not dragInput or not isMove(inp) then return end
-    local d = inp.Position - dragStart
-    local vp = workspace.CurrentCamera.ViewportSize
-    local x = math.clamp(startPos.X + d.X, 0, math.max(0, vp.X - win.AbsoluteSize.X))
-    local y = math.clamp(startPos.Y + d.Y, 0, math.max(0, vp.Y - win.AbsoluteSize.Y))
-    win.Position = UDim2.fromOffset(x, y)
-end))
-bind(UIS.InputEnded:Connect(function(inp)
-    if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
-        dragInput = nil
-    end
-end))
+    head.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+            dragInput = inp
+            dragStart = inp.Position
+            startPos = Vector2.new(win.AbsolutePosition.X, win.AbsolutePosition.Y)
+        end
+    end)
+    bind(UIS.InputChanged:Connect(function(inp)
+        if not dragInput or not isMove(inp) then return end
+        local d = inp.Position - dragStart
+        local vp = workspace.CurrentCamera.ViewportSize
+        local x = math.clamp(startPos.X + d.X, 0, math.max(0, vp.X - win.AbsoluteSize.X))
+        local y = math.clamp(startPos.Y + d.Y, 0, math.max(0, vp.Y - win.AbsoluteSize.Y))
+        win.Position = UDim2.fromOffset(x, y)
+    end))
+    bind(UIS.InputEnded:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+            dragInput = nil
+        end
+    end))
+
+    -- menu toggle
+    bind(UIS.InputBegan:Connect(function(inp, processed)
+        if processed then return end
+        if inp.KeyCode == Enum.KeyCode.RightShift then
+            win.Visible = not win.Visible
+        end
+    end))
 
     local minimized = false
     hbtn("–", -58, function()
